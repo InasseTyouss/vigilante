@@ -1,0 +1,45 @@
+name: Vigilante Autius
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # cada 5 min (GitHub puede retrasarlo unos minutos)
+  workflow_dispatch:         # botón para lanzarlo a mano
+
+concurrency:
+  group: autius
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Recuperar estado
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: autius-state-${{ github.run_id }}
+          restore-keys: autius-state-
+
+      - name: Comprobar huecos
+        env:
+          AUTIUS_COOKIE: ${{ secrets.AUTIUS_COOKIE }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python check.py
+
+      - name: Guardar estado
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: autius-state-${{ github.run_id }}
