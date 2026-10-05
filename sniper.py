@@ -88,10 +88,27 @@ def fetch_week():
     return r.json().get("slots", [])
 
 
-def reserve(slot):
-    """Devuelve (ok, status, texto)."""
+EXIT_POINTS = {}   # "NOMBRE APELLIDO" -> exitPointId (se carga del booking-catalog)
+
+
+def load_exit_points():
     try:
-        r = S.post(f"{BASE}/v1/student/lessons/reserve/{slot['id']}", json={}, timeout=8)
+        r = S.get(f"{BASE}/v1/student/lessons/booking-catalog", timeout=10)
+        for i in r.json().get("instructors", []):
+            EXIT_POINTS[i.get("displayName", "").strip().upper()] = i.get("exitPointId")
+    except Exception as e:
+        log("No pude cargar puntos de salida:", e)
+
+
+def reserve(slot):
+    """Devuelve (ok, status, texto). Si la API pide datos (400/422), reintenta con el punto de salida."""
+    url = f"{BASE}/v1/student/lessons/reserve/{slot['id']}"
+    try:
+        r = S.post(url, json={}, timeout=8)
+        if r.status_code in (400, 422):
+            ep = EXIT_POINTS.get(teacher(slot).upper()) or next(iter(EXIT_POINTS.values()), None)
+            log(f"Reserva pidió datos [{r.status_code}] {r.text[:200]} -> reintento con exitPointId")
+            r = S.post(url, json={"exitPointId": ep}, timeout=8)
         return r.ok, r.status_code, r.text[:300]
     except requests.RequestException as e:
         return False, 0, str(e)
@@ -170,6 +187,8 @@ def probe():
 
 
 def dry():
+    load_exit_points()
+    log("Puntos de salida cargados:", len(EXIT_POINTS))
     slots = fetch_week()
     to_book, done = plan(slots)
     log(f"Slots semana: {len(slots)} · días ya completos: {sorted(done)}")
@@ -179,6 +198,7 @@ def dry():
 def live():
     t0 = time.time()
     S.get(f"{BASE}/auth/get-session", timeout=10)  # calienta conexión y renueva sesión
+    load_exit_points()
     booked_log, last_beat, fails = [], 0, {}
     while True:
         if time.time() - t0 > RUN_MINUTES * 60:
