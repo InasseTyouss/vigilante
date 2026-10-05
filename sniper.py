@@ -12,6 +12,7 @@ Modos (variable MODE):
   probe -> NO reserva nada. Hace una reserva falsa a un id inexistente para ver qué pide la API.
   dry   -> NO reserva nada. Muestra qué reservaría ahora mismo.
   live  -> Vigila cada segundo durante RUN_MINUTES y reserva.
+  test  -> RESERVA DE VERDAD 1 sola clase (la primera libre) del día TEST_DATE, para comprobar que reservar funciona.
 """
 import os, time, smtplib, datetime as dt
 from concurrent.futures import ThreadPoolExecutor
@@ -21,7 +22,7 @@ import requests
 
 # ---------------- CONFIGURACIÓN ----------------
 TZ = ZoneInfo("Europe/Madrid")
-WEEK_FROM, WEEK_TO = "2026-10-09", "2026-10-23"
+WEEK_FROM, WEEK_TO = "2026-10-19", "2026-10-23"
 # Día de la semana (0=lunes) -> hora mínima de inicio. Orden = prioridad.
 DAY_RULES = [(1, "18:45"), (2, "18:45"), (0, "18:45"), (4, "16:00")]
 DAYS_WANTED = 2
@@ -195,6 +196,26 @@ def dry():
     log("Reservaría:", [label(s) for s in to_book] or "nada (todavía no hay huecos válidos)")
 
 
+def test():
+    day = (os.environ.get("TEST_DATE") or "").strip()
+    if not day:
+        raise SystemExit("Falta TEST_DATE (formato 2026-10-07)")
+    load_exit_points()
+    r = S.get(f"{BASE}/v1/student/lessons/calendar", params={"from": day, "to": day}, timeout=10)
+    r.raise_for_status()
+    slots = r.json().get("slots", [])
+    free = sorted([s for s in slots if not s.get("isReservedByMe")], key=lambda s: s["startTime"])
+    log(f"TEST {day}: {len(slots)} slots, {len(free)} libres:", [label(s) for s in free])
+    if not free:
+        log("No hay huecos libres ese día, no reservo nada.")
+        return
+    s = free[0]
+    t = time.time()
+    ok, st, txt = reserve(s)
+    log(f"TEST reserva {'OK' if ok else 'FALLO'} {label(s)} [{st}] en {int((time.time()-t)*1000)} ms -> {txt}")
+    send_email(f"SNIPER Autius TEST: {'OK' if ok else 'FALLO'}", f"{label(s)}\n[{st}] {txt}")
+
+
 def live():
     t0 = time.time()
     S.get(f"{BASE}/auth/get-session", timeout=10)  # calienta conexión y renueva sesión
@@ -237,4 +258,4 @@ def live():
 
 
 if __name__ == "__main__":
-    {"probe": probe, "dry": dry, "live": live}.get(MODE, live)()
+    {"probe": probe, "dry": dry, "live": live, "test": test}.get(MODE, live)()
