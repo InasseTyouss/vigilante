@@ -1,0 +1,37 @@
+name: Sniper Autius
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "probe = prueba sin reservar · dry = simula · live = reserva de verdad"
+        default: "live"
+        type: choice
+        options: [probe, dry, live]
+      minutes:
+        description: "Minutos vigilando"
+        default: "15"
+
+concurrency:
+  group: sniper
+  cancel-in-progress: false
+
+jobs:
+  snipe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Sniper
+        env:
+          MODE: ${{ inputs.mode || 'live' }}
+          RUN_MINUTES: ${{ inputs.minutes }}
+          AUTIUS_COOKIE: ${{ secrets.AUTIUS_COOKIE }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python sniper.py
