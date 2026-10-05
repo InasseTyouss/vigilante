@@ -4,13 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "probe = prueba sin reservar · dry = simula · live = reserva de verdad"
+        description: "probe/dry = sin reservar · live = sniper · test = reserva 1 clase de prueba"
         default: "live"
         type: choice
-        options: [probe, dry, live]
+        options: [probe, dry, live, test]
       minutes:
         description: "Minutos vigilando"
         default: "15"
+      test_date:
+        description: "Solo para mode=test: día a reservar (AAAA-MM-DD)"
+        default: ""
 
 concurrency:
   group: sniper
@@ -30,6 +33,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode || 'live' }}
           RUN_MINUTES: ${{ inputs.minutes }}
+          TEST_DATE: ${{ inputs.test_date }}
           AUTIUS_COOKIE: ${{ secrets.AUTIUS_COOKIE }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
