@@ -21,7 +21,7 @@ import requests
 
 # ---------------- CONFIGURACIÓN ----------------
 TZ = ZoneInfo("Europe/Madrid")
-WEEK_FROM, WEEK_TO = "2026-10-19", "2026-10-23"
+WEEK_FROM, WEEK_TO = "2026-10-09", "2026-10-23"
 # Día de la semana (0=lunes) -> hora mínima de inicio. Orden = prioridad.
 DAY_RULES = [(1, "18:45"), (2, "18:45"), (0, "18:45"), (4, "16:00")]
 DAYS_WANTED = 2
