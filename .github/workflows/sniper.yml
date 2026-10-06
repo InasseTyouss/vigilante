@@ -10,7 +10,7 @@ on:
         options: [probe, dry, live, test]
       minutes:
         description: "Minutos vigilando"
-        default: "15"
+        default: "90"
       test_date:
         description: "Solo para mode=test: día a reservar (AAAA-MM-DD)"
         default: ""
@@ -22,7 +22,7 @@ concurrency:
 jobs:
   snipe:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
