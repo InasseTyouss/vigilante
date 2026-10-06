@@ -1,18 +1,20 @@
 """
-SNIPER Autius: consulta el calendario cada segundo y, en cuanto salen huecos,
-reserva 2 clases seguidas con el mismo profesor en 2 días de la semana objetivo.
+SNIPER Autius: consulta el calendario cada segundo y, en cuanto salen huecos, reserva.
 
-Reglas (editar abajo si cambian):
-  - Semana: 19-23 oct 2026. Prioridad de días: martes, miércoles, luego lunes, viernes.
-  - Lun/Mar/Mié: empieza a partir de las 18:45. Viernes: a partir de las 16:00. Jueves y finde: no.
-  - En cada día: 2 clases de 45 min seguidas (una termina cuando empieza la otra) con el mismo profesor.
-  - Objetivo: 2 días con su pareja de clases = 4 clases.
+Objetivos (semana 19-23 oct 2026), se persiguen EN PARALELO:
+  TARDES : 2 días, cada uno con 2 clases seguidas del mismo profe.
+           Prioridad: martes 20 (>=18:45), miércoles 21 (>=18:45), viernes 23 (>=16:00).
+           Lunes (festivo) y jueves no.
+           El viernes, si hay 3 seguidas con el mismo profe, coge las 3.
+  MAÑANAS: 2 dobles 07:30-09:00 (07:30 + 08:15), martes/miércoles/viernes, mismo profe en las dos.
+           Preferencia DAVID PIZARRO; si ese día no hay con él, vale otro profe.
+Se reserva al instante lo que vaya saliendo (los días se abren a mano, poco a poco).
 
 Modos (variable MODE):
-  probe -> NO reserva nada. Hace una reserva falsa a un id inexistente para ver qué pide la API.
+  probe -> NO reserva nada. Reserva falsa a un id inexistente para ver qué pide la API.
   dry   -> NO reserva nada. Muestra qué reservaría ahora mismo.
   live  -> Vigila cada segundo durante RUN_MINUTES y reserva.
-  test  -> RESERVA DE VERDAD 1 sola clase (la primera libre) del día TEST_DATE, para comprobar que reservar funciona.
+  test  -> RESERVA DE VERDAD 1 sola clase (la primera libre) del día TEST_DATE.
 """
 import os, time, smtplib, datetime as dt
 from concurrent.futures import ThreadPoolExecutor
@@ -23,12 +25,20 @@ import requests
 # ---------------- CONFIGURACIÓN ----------------
 TZ = ZoneInfo("Europe/Madrid")
 WEEK_FROM, WEEK_TO = "2026-10-19", "2026-10-23"
-# Día de la semana (0=lunes) -> hora mínima de inicio. Orden = prioridad.
-DAY_RULES = [(1, "18:45"), (2, "18:45"), (0, "18:45"), (4, "16:00")]
-DAYS_WANTED = 2
+# Cada objetivo: días (0=lunes) en orden de prioridad con su hora mínima de inicio,
+# horas de inicio exactas permitidas (None = cualquiera), profesor (None = cualquiera) y nº de días.
+# "prefer": profesor preferido (si no hay, vale otro). "max_block": días (0=lunes) en los que
+# se aceptan más de 2 clases seguidas (ej. viernes tarde: hasta 3).
+GOALS = [
+    {"name": "TARDES", "days": [(1, "18:45"), (2, "18:45"), (4, "16:00")],
+     "starts": None, "teacher": None, "prefer": None, "max_block": {4: 3}, "days_wanted": 2},
+    {"name": "MAÑANAS", "days": [(1, "07:30"), (2, "07:30"), (4, "07:30")],
+     "starts": {"07:30", "08:15"}, "teacher": None, "prefer": "DAVID PIZARRO", "max_block": {},
+     "days_wanted": 2},
+]
 LESSON_TYPE = "class_45"          # clase individual de 45 min
 POLL_SECONDS = 1.0
-RUN_MINUTES = float(__import__("os").environ.get("RUN_MINUTES") or 15)   # cuánto rato vigila desde que lo lanzas
+RUN_MINUTES = float(__import__("os").environ.get("RUN_MINUTES") or 90)   # cuánto rato vigila desde que lo lanzas
 # ------------------------------------------------
 
 BASE = "https://api.autius.com/api"
@@ -117,17 +127,17 @@ def reserve(slot):
 
 # ---------------- lógica de selección ----------------
 
-def rule_for(date_str):
+def min_start(goal, date_str):
     wd = dt.date.fromisoformat(date_str).weekday()
-    for d, min_start in DAY_RULES:
-        if d == wd:
-            return min_start
-    return None
+    return next((m for d, m in goal["days"] if d == wd), None)
 
 
-def valid(s):
-    m = rule_for(s["date"])
-    return (m is not None and hhmm(s["startTime"]) >= m
+def valid(goal, s):
+    m = min_start(goal, s["date"])
+    st = hhmm(s["startTime"])
+    return (m is not None and st >= m
+            and (goal["starts"] is None or st in goal["starts"])
+            and (goal["teacher"] is None or teacher(s).upper() == goal["teacher"])
             and s.get("lessonTypeKey", LESSON_TYPE) == LESSON_TYPE)
 
 
@@ -141,41 +151,74 @@ def find_pairs(slots):
     return [(a, b) for a in slots for b in slots if a is not b and is_pair(a, b)]
 
 
-def plan(all_slots, skip=frozenset()):
-    """Decide qué reservar en este instante. Devuelve (lista de slots a reservar, días ya completos)."""
-    mine = [s for s in all_slots if s.get("isReservedByMe")]
-    free = [s for s in all_slots if not s.get("isReservedByMe") and valid(s) and s["id"] not in skip]
+def best_block(goal, day_slots):
+    """Mejor bloque de clases seguidas del mismo profe en un día: profe preferido > más largo > más temprano."""
+    if not day_slots:
+        return []
+    wd = dt.date.fromisoformat(day_slots[0]["date"]).weekday()
+    max_len = goal["max_block"].get(wd, 2)
+    slots = sorted(day_slots, key=lambda s: s["startTime"])
+    blocks = []
+    for a in slots:                                   # cadena que empieza en a
+        chain = [a]
+        while len(chain) < max_len:
+            nxt = next((s for s in slots if is_pair(chain[-1], s)), None)
+            if not nxt:
+                break
+            chain.append(nxt)
+        if len(chain) >= 2:
+            blocks.append(chain)
+    if not blocks:
+        return []
+    pref = goal.get("prefer")
+    blocks.sort(key=lambda c: (0 if pref and teacher(c[0]).upper() == pref else 1, -len(c), c[0]["startTime"]))
+    return blocks[0]
 
-    done_days = {a["date"] for a, _ in find_pairs(mine)}
-    need = DAYS_WANTED - len(done_days)
+
+def date_for(wd):
+    start = dt.date.fromisoformat(WEEK_FROM)
+    return (start + dt.timedelta(days=(wd - start.weekday()) % 7)).isoformat()
+
+
+def plan_goal(goal, all_slots, skip):
+    """Qué reservar ahora para este objetivo. Devuelve (slots a reservar, días ya completos)."""
+    mine = [s for s in all_slots if s.get("isReservedByMe") and valid(goal, s)]
+    free = [s for s in all_slots if not s.get("isReservedByMe") and valid(goal, s) and s["id"] not in skip]
+    done = {a["date"] for a, _ in find_pairs(mine)}
+    need = goal["days_wanted"] - len(done)
+    to_book, used = [], set()
     if need <= 0:
-        return [], done_days
-
-    to_book, used_days = [], set()
-
-    # 1) Días con 1 sola clase mía (pareja a medias): completar con la de antes/después del mismo profe.
+        return [], done
+    # 1) Días con 1 sola clase mía de este objetivo: buscarle compañera.
     for m in mine:
         d = m["date"]
-        if d in done_days or d in used_days or rule_for(d) is None or need <= 0:
+        if need <= 0 or d in done or d in used:
             continue
         mate = next((f for f in free if is_pair(m, f) or is_pair(f, m)), None)
         if mate:
-            to_book.append(mate); used_days.add(d); need -= 1
-
-    # 2) Días nuevos por orden de prioridad.
-    week_start = dt.date.fromisoformat(WEEK_FROM)
-    for wd, _ in DAY_RULES:
+            to_book.append(mate); used.add(d); need -= 1
+    # 2) Días nuevos por prioridad.
+    for wd, _ in goal["days"]:
         if need <= 0:
             break
-        d = (week_start + dt.timedelta(days=(wd - week_start.weekday()) % 7)).isoformat()
-        if d in done_days or d in used_days or any(m["date"] == d for m in mine):
+        d = date_for(wd)
+        if d in done or d in used or any(m["date"] == d for m in mine):
             continue
-        pairs = find_pairs([f for f in free if f["date"] == d])
-        if pairs:
-            a, b = pairs[0]                      # la pareja más temprana del día
-            to_book += [a, b]; used_days.add(d); need -= 1
+        block = best_block(goal, [f for f in free if f["date"] == d])
+        if block:
+            to_book += block; used.add(d); need -= 1
+    return to_book, done
 
-    return to_book, done_days
+
+def plan(all_slots, skip=frozenset()):
+    """Junta todos los objetivos. Devuelve (slots a reservar, {objetivo: días completos}, ¿todo cumplido?)."""
+    to_book, status, ids = [], {}, set()
+    for g in GOALS:
+        tb, done = plan_goal(g, all_slots, skip | ids)
+        to_book += tb; ids |= {s["id"] for s in tb}
+        status[g["name"]] = sorted(done)
+    finished = all(len(status[g["name"]]) >= g["days_wanted"] for g in GOALS)
+    return to_book, status, finished
 
 
 # ---------------- modos ----------------
@@ -191,8 +234,8 @@ def dry():
     load_exit_points()
     log("Puntos de salida cargados:", len(EXIT_POINTS))
     slots = fetch_week()
-    to_book, done = plan(slots)
-    log(f"Slots semana: {len(slots)} · días ya completos: {sorted(done)}")
+    to_book, status, _ = plan(slots)
+    log(f"Slots semana: {len(slots)} · completos: {status}")
     log("Reservaría:", [label(s) for s in to_book] or "nada (todavía no hay huecos válidos)")
 
 
@@ -229,9 +272,10 @@ def live():
         try:
             slots = fetch_week()
             skip = {k for k, n in fails.items() if n >= 3}
-            to_book, done = plan(slots, skip)
-            if len(done) >= DAYS_WANTED:
-                log("¡Objetivo cumplido!", sorted(done))
+            to_book, status, finished = plan(slots, skip)
+            if finished:
+                log("¡Todo cumplido!", status)
+                send_email("SNIPER Autius: todo cumplido", f"{status}\n\n" + "\n".join(booked_log))
                 break
             if to_book:
                 log("Reservando:", [label(s) for s in to_book])
