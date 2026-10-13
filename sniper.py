@@ -1,13 +1,11 @@
 """
 SNIPER Autius: consulta el calendario cada segundo y, en cuanto salen huecos, reserva.
 
-Objetivos (semana 19-23 oct 2026), se persiguen EN PARALELO:
-  TARDES : 2 días, cada uno con 2 clases seguidas del mismo profe.
-           Prioridad: martes 20 (>=18:45), miércoles 21 (>=18:45), viernes 23 (>=16:00).
-           Lunes (festivo) y jueves no.
-           El viernes, si hay 3 seguidas con el mismo profe, coge las 3.
-  MAÑANAS: 2 dobles 07:30-09:00 (07:30 + 08:15), martes/miércoles/viernes, mismo profe en las dos.
-           Preferencia DAVID PIZARRO; si ese día no hay con él, vale otro profe.
+Objetivos (semana 26-30 oct 2026), se persiguen EN PARALELO:
+  VIERNES: 1 bloque el viernes 30 desde 16:00. Triple (3 seguidas mismo profe) si se puede, si no doble.
+           Preferente JAVIER ESTEBAN; si no hay con él, vale otro profe.
+  DOBLE  : 1 doble (2 seguidas mismo profe) el martes 27 o miércoles 28 desde 18:45.
+           Preferente JAVIER ESTEBAN; si no hay con él ese día, vale otro profe.
 Se reserva al instante lo que vaya saliendo (los días se abren a mano, poco a poco).
 
 Modos (variable MODE):
@@ -24,20 +22,22 @@ import requests
 
 # ---------------- CONFIGURACIÓN ----------------
 TZ = ZoneInfo("Europe/Madrid")
-WEEK_FROM, WEEK_TO = "2026-10-19", "2026-10-23"
+WEEK_FROM, WEEK_TO = "2026-10-26", "2026-10-30"
 # Cada objetivo: días (0=lunes) en orden de prioridad con su hora mínima de inicio,
 # horas de inicio exactas permitidas (None = cualquiera), profesor (None = cualquiera) y nº de días.
 # "prefer": profesor preferido (si no hay, vale otro). "max_block": días (0=lunes) en los que
-# se aceptan más de 2 clases seguidas (ej. viernes tarde: hasta 3).
+# se aceptan más de 2 clases seguidas (ej. viernes: hasta 3 -> triple).
 GOALS = [
-    {"name": "TARDES", "days": [(1, "18:45"), (2, "18:45"), (4, "16:00")],
-     "starts": None, "teacher": None, "prefer": None, "max_block": {4: 3}, "days_wanted": 2},
-    {"name": "MAÑANAS", "days": [(1, "07:30"), (2, "07:30"), (4, "07:30")],
-     "starts": {"07:30", "08:15"}, "teacher": None, "prefer": "DAVID PIZARRO", "max_block": {},
-     "days_wanted": 2},
+    # Viernes 30: triple si se puede (si no, doble), desde las 16:00. Preferente JAVIER ESTEBAN.
+    {"name": "VIERNES", "days": [(4, "16:00")],
+     "starts": None, "teacher": None, "prefer": "JAVIER ESTEBAN", "max_block": {4: 3}, "days_wanted": 1},
+    # Martes 27 o miércoles 28: una doble desde las 18:45. Preferente JAVIER ESTEBAN; si no, otro.
+    {"name": "DOBLE", "days": [(1, "18:45"), (2, "18:45")],
+     "starts": None, "teacher": None, "prefer": "JAVIER ESTEBAN", "max_block": {}, "days_wanted": 1},
 ]
 LESSON_TYPE = "class_45"          # clase individual de 45 min
 POLL_SECONDS = 1.0
+GRACE_SECONDS = 0                 # 0 = no esperar: coge ya lo que haya (Javier preferido en la misma consulta)
 RUN_MINUTES = float(__import__("os").environ.get("RUN_MINUTES") or 90)   # cuánto rato vigila desde que lo lanzas
 # ------------------------------------------------
 
@@ -180,8 +180,10 @@ def date_for(wd):
     return (start + dt.timedelta(days=(wd - start.weekday()) % 7)).isoformat()
 
 
-def plan_goal(goal, all_slots, skip):
-    """Qué reservar ahora para este objetivo. Devuelve (slots a reservar, días ya completos)."""
+def plan_goal(goal, all_slots, skip, elapsed=1e9):
+    """Qué reservar ahora para este objetivo. Devuelve (slots a reservar, días ya completos).
+    Si hay profe preferido, primero se busca a ese profe en TODOS los días del objetivo;
+    solo si no aparece y ya pasó el margen de espera (GRACE) se acepta otro profe."""
     mine = [s for s in all_slots if s.get("isReservedByMe") and valid(goal, s)]
     free = [s for s in all_slots if not s.get("isReservedByMe") and valid(goal, s) and s["id"] not in skip]
     done = {a["date"] for a, _ in find_pairs(mine)}
@@ -197,24 +199,34 @@ def plan_goal(goal, all_slots, skip):
         mate = next((f for f in free if is_pair(m, f) or is_pair(f, m)), None)
         if mate:
             to_book.append(mate); used.add(d); need -= 1
-    # 2) Días nuevos por prioridad.
-    for wd, _ in goal["days"]:
-        if need <= 0:
-            break
+    # 2) Días nuevos. Mejor bloque de cada día candidato, con y sin el profe preferido.
+    pref = goal.get("prefer")
+    cands = []   # (prioridad_del_día, bloque)
+    for prio, (wd, _) in enumerate(goal["days"]):
         d = date_for(wd)
         if d in done or d in used or any(m["date"] == d for m in mine):
             continue
         block = best_block(goal, [f for f in free if f["date"] == d])
         if block:
-            to_book += block; used.add(d); need -= 1
+            cands.append((prio, block))
+    while need > 0 and cands:
+        pref_cands = [c for c in cands if pref and teacher(c[1][0]).upper() == pref]
+        if pref_cands:                                   # hay con el profe preferido: ese primero
+            prio, block = min(pref_cands, key=lambda c: (c[0], -len(c[1]), c[1][0]["startTime"]))
+        elif pref and elapsed < GRACE_SECONDS:           # aún puede salir el preferido: esperar
+            break
+        else:                                            # sin preferido (o ya esperamos): por prioridad de día
+            prio, block = min(cands, key=lambda c: (c[0], -len(c[1]), c[1][0]["startTime"]))
+        to_book += block; used.add(block[0]["date"]); need -= 1
+        cands = [c for c in cands if c[1][0]["date"] not in used]
     return to_book, done
 
 
-def plan(all_slots, skip=frozenset()):
+def plan(all_slots, skip=frozenset(), elapsed=1e9):
     """Junta todos los objetivos. Devuelve (slots a reservar, {objetivo: días completos}, ¿todo cumplido?)."""
     to_book, status, ids = [], {}, set()
     for g in GOALS:
-        tb, done = plan_goal(g, all_slots, skip | ids)
+        tb, done = plan_goal(g, all_slots, skip | ids, elapsed)
         to_book += tb; ids |= {s["id"] for s in tb}
         status[g["name"]] = sorted(done)
     finished = all(len(status[g["name"]]) >= g["days_wanted"] for g in GOALS)
@@ -272,7 +284,7 @@ def live():
         try:
             slots = fetch_week()
             skip = {k for k, n in fails.items() if n >= 3}
-            to_book, status, finished = plan(slots, skip)
+            to_book, status, finished = plan(slots, skip, elapsed=time.time() - t0)
             if finished:
                 log("¡Todo cumplido!", status)
                 send_email("SNIPER Autius: todo cumplido", f"{status}\n\n" + "\n".join(booked_log))
