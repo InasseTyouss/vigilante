@@ -29,8 +29,11 @@ WEEK_FROM, WEEK_TO = "2026-10-26", "2026-10-30"
 # se aceptan más de 2 clases seguidas (ej. viernes: hasta 3 -> triple).
 GOALS = [
     # Viernes 30: triple si se puede (si no, doble), desde las 16:00. Preferente JAVIER ESTEBAN.
+    # "upgrade_to": si ya tengo un bloque de OTRO profe ese día y luego salen clases con este profe,
+    # reserva las de este profe y cancela las que tenía (2 o 3 valen).
     {"name": "VIERNES", "days": [(4, "16:00")],
-     "starts": None, "teacher": None, "prefer": "JAVIER ESTEBAN", "max_block": {4: 3}, "days_wanted": 1},
+     "starts": None, "teacher": None, "prefer": "JAVIER ESTEBAN", "max_block": {4: 3},
+     "upgrade_to": "JAVIER ESTEBAN", "days_wanted": 1},
     # Martes 27 o miércoles 28: una doble desde las 18:45. Preferente JAVIER ESTEBAN; si no, otro.
     {"name": "DOBLE", "days": [(1, "18:45"), (2, "18:45")],
      "starts": None, "teacher": None, "prefer": "JAVIER ESTEBAN", "max_block": {}, "days_wanted": 1},
@@ -120,6 +123,16 @@ def reserve(slot):
             ep = EXIT_POINTS.get(teacher(slot).upper()) or next(iter(EXIT_POINTS.values()), None)
             log(f"Reserva pidió datos [{r.status_code}] {r.text[:200]} -> reintento con exitPointId")
             r = S.post(url, json={"exitPointId": ep}, timeout=8)
+        return r.ok, r.status_code, r.text[:300]
+    except requests.RequestException as e:
+        return False, 0, str(e)
+
+
+def cancel(slot):
+    """Cancela una clase mía. Devuelve (ok, status, texto)."""
+    url = f"{BASE}/v1/student/lessons/cancel/{slot['id']}"
+    try:
+        r = S.post(url, json={}, timeout=8)
         return r.ok, r.status_code, r.text[:300]
     except requests.RequestException as e:
         return False, 0, str(e)
@@ -233,6 +246,29 @@ def plan(all_slots, skip=frozenset(), elapsed=1e9):
     return to_book, status, finished
 
 
+def plan_upgrades(all_slots, skip=frozenset()):
+    """Para objetivos con 'upgrade_to': si tengo un bloque de OTRO profe y sale uno con el profe
+    preferido ese día, devuelve [{book:[nuevas], cancel:[las mías]}]."""
+    ups = []
+    for g in GOALS:
+        pref = g.get("upgrade_to")
+        if not pref:
+            continue
+        for wd, _ in g["days"]:
+            d = date_for(wd)
+            mine = [s for s in all_slots if s.get("isReservedByMe") and s["date"] == d and valid(g, s)]
+            held_other = [s for s in mine if teacher(s).upper() != pref]
+            have_pref = any(teacher(s).upper() == pref for s in mine)
+            if not held_other or have_pref:
+                continue
+            free_pref = [s for s in all_slots if not s.get("isReservedByMe") and s["date"] == d
+                         and valid(g, s) and teacher(s).upper() == pref and s["id"] not in skip]
+            block = best_block(g, free_pref)
+            if len(block) >= 2:
+                ups.append({"book": block, "cancel": held_other})
+    return ups
+
+
 # ---------------- modos ----------------
 
 def probe():
@@ -240,6 +276,12 @@ def probe():
     ok, st, txt = reserve(fake)
     log(f"PROBE reserve -> status {st}: {txt}")
     log("Semana objetivo ahora mismo:", len(fetch_week()), "slots")
+
+
+def probecancel():
+    fake = {"id": "00000000-0000-0000-0000-000000000000"}
+    ok, st, txt = cancel(fake)
+    log(f"PROBE cancel -> status {st}: {txt}")
 
 
 def dry():
@@ -276,19 +318,67 @@ def live():
     S.get(f"{BASE}/auth/get-session", timeout=10)  # calienta conexión y renueva sesión
     load_exit_points()
     booked_log, last_beat, fails = [], 0, {}
+    up_next = {}                                   # día -> cuándo reintentar un upgrade
+    has_upgrade = any(g.get("upgrade_to") for g in GOALS)
+    done_emailed = False
     while True:
         if time.time() - t0 > RUN_MINUTES * 60:
             log(f"Pasaron {RUN_MINUTES:g} min, salgo.")
-            send_email("SNIPER Autius: terminado", "Resumen:\n" + ("\n".join(booked_log) or "No se reservó nada."))
+            send_email("SNIPER Autius: terminado", "Resumen:\n" + ("\n".join(booked_log) or "Sin cambios."))
             break
         try:
             slots = fetch_week()
             skip = {k for k, n in fails.items() if n >= 3}
+
+            # --- UPGRADES: con saldo 0 hay que CANCELAR primero y reservar justo después ---
+            for up in plan_upgrades(slots, skip):
+                d = up["book"][0]["date"]
+                if time.time() < up_next.get(d, 0):
+                    continue
+                log("UPGRADE", d, "cancelo Luis y cojo:", [label(s) for s in up["book"]])
+                # 1) cancelar las que tengo para liberar saldo
+                cres = [cancel(s) for s in up["cancel"]]
+                for s, (ok, st, tx) in zip(up["cancel"], cres):
+                    log(f"{'OK cancelada' if ok else 'NO canceló'} {label(s)} [{st}] {'' if ok else tx}")
+                if not any(ok for ok, _, _ in cres):
+                    up_next[d] = time.time() + 20   # no canceló nada: reintentar luego
+                    continue
+                # 2) reservar las del profe preferido
+                with ThreadPoolExecutor(max_workers=len(up["book"])) as ex:
+                    res = list(ex.map(reserve, up["book"]))
+                if all(ok for ok, _, _ in res):
+                    lines = [f"OK upgrade -> {label(s)}" for s in up["book"]]
+                    for l in lines:
+                        log(l)
+                    booked_log += lines
+                    send_email("SNIPER Autius: upgrade a " + teacher(up["book"][0]),
+                               "\n".join(lines) + "\n\nRevisa: https://app.autius.com/calendario")
+                else:
+                    # 3) falló reservar Javier -> intentar recuperar las de Luis
+                    log("UPGRADE: falló reservar el profe preferido, intento recuperar las de antes…")
+                    rb = [reserve(s) for s in up["cancel"]]
+                    ok_rb = sum(1 for ok, _, _ in rb if ok)
+                    msg = (f"No pude pasar a {teacher(up['book'][0])} el {d}. "
+                           f"Recuperé {ok_rb}/{len(up['cancel'])} clases anteriores. "
+                           f"REVISA el calendario a mano.")
+                    log(msg)
+                    send_email("SNIPER Autius: UPGRADE falló, revisa", msg + "\n\nhttps://app.autius.com/calendario")
+                    up_next[d] = time.time() + 30
+
             to_book, status, finished = plan(slots, skip, elapsed=time.time() - t0)
-            if finished:
+            if finished and not has_upgrade:
                 log("¡Todo cumplido!", status)
                 send_email("SNIPER Autius: todo cumplido", f"{status}\n\n" + "\n".join(booked_log))
                 break
+            if finished and has_upgrade:
+                if not done_emailed:
+                    log("Todo reservado. Sigo vigilando por si sale el profe preferido…", status)
+                    done_emailed = True
+                if time.time() - last_beat > 60:
+                    log("Vigilando upgrade…")
+                    last_beat = time.time()
+                time.sleep(POLL_SECONDS)
+                continue
             if to_book:
                 log("Reservando:", [label(s) for s in to_book])
                 with ThreadPoolExecutor(max_workers=len(to_book)) as ex:
@@ -314,4 +404,4 @@ def live():
 
 
 if __name__ == "__main__":
-    {"probe": probe, "dry": dry, "live": live, "test": test}.get(MODE, live)()
+    {"probe": probe, "probecancel": probecancel, "dry": dry, "live": live, "test": test}.get(MODE, live)()
