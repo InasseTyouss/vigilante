@@ -7,7 +7,7 @@ on:
         description: "probe/dry = sin reservar · live = sniper · test = reserva 1 clase de prueba"
         default: "live"
         type: choice
-        options: [probe, dry, live, test]
+        options: [probe, probecancel, dry, live, test]
       minutes:
         description: "Minutos vigilando"
         default: "90"
