@@ -1,11 +1,11 @@
 """
 SNIPER Autius: consulta el calendario cada segundo y, en cuanto salen huecos, reserva.
 
-Objetivos (semana 26-30 oct 2026), se persiguen EN PARALELO:
-  VIERNES: 1 bloque el viernes 30 desde 16:00. Triple (3 seguidas mismo profe) si se puede, si no doble.
-           Preferente JAVIER ESTEBAN; si no hay con él, vale otro profe.
-  DOBLE  : 1 doble (2 seguidas mismo profe) el martes 27 o miércoles 28 desde 18:45.
-           Preferente JAVIER ESTEBAN; si no hay con él ese día, vale otro profe.
+Objetivos (semana 2-6 nov 2026), se persiguen EN PARALELO:
+  DOBLE : 1 doble (2 seguidas mismo profe) martes 3 o miércoles 4 (prefiere martes), desde 18:45,
+          con ANTONIO DEL BARRIO (si no hay con él, otro profe).
+  TRIPLE: viernes 6 desde 15:15. Triple (3 seguidas mismo profe) si se puede, si no doble.
+          Preferente JAVIER ESTEBAN o ANTONIO DEL BARRIO; si no hay, otro profe.
 Se reserva al instante lo que vaya saliendo (los días se abren a mano, poco a poco).
 
 Modos (variable MODE):
@@ -22,21 +22,21 @@ import requests
 
 # ---------------- CONFIGURACIÓN ----------------
 TZ = ZoneInfo("Europe/Madrid")
-WEEK_FROM, WEEK_TO = "2026-10-26", "2026-10-30"
+WEEK_FROM, WEEK_TO = "2026-11-02", "2026-11-06"
 # Cada objetivo: días (0=lunes) en orden de prioridad con su hora mínima de inicio,
 # horas de inicio exactas permitidas (None = cualquiera), profesor (None = cualquiera) y nº de días.
 # "prefer": profesor preferido (si no hay, vale otro). "max_block": días (0=lunes) en los que
 # se aceptan más de 2 clases seguidas (ej. viernes: hasta 3 -> triple).
 GOALS = [
-    # Viernes 30: triple si se puede (si no, doble), desde las 16:00. Preferente JAVIER ESTEBAN.
-    # "upgrade_to": si ya tengo un bloque de OTRO profe ese día y luego salen clases con este profe,
-    # reserva las de este profe y cancela las que tenía (2 o 3 valen).
-    {"name": "VIERNES", "days": [(4, "16:00")],
-     "starts": None, "teacher": None, "prefer": "JAVIER ESTEBAN", "max_block": {4: 3},
-     "upgrade_to": "JAVIER ESTEBAN", "days_wanted": 1},
-    # Martes 27 o miércoles 28: una doble desde las 18:45. Preferente JAVIER ESTEBAN; si no, otro.
+    # Semana 2-6 nov. DOBLE: martes 3 o miércoles 4 (prefiere martes), desde 18:45, con ANTONIO DEL BARRIO.
+    # "strict": True -> solo reserva con los profes de "prefer"; si no hay, no reserva ese día.
     {"name": "DOBLE", "days": [(1, "18:45"), (2, "18:45")],
-     "starts": None, "teacher": None, "prefer": "JAVIER ESTEBAN", "max_block": {}, "days_wanted": 1},
+     "starts": None, "teacher": None, "prefer": ["ANTONIO DEL BARRIO"], "strict": True,
+     "max_block": {}, "days_wanted": 1},
+    # TRIPLE: viernes 6, desde 15:15. Triple si se puede (si no, doble). JAVIER ESTEBAN o ANTONIO DEL BARRIO.
+    {"name": "TRIPLE", "days": [(4, "15:15")],
+     "starts": None, "teacher": None, "prefer": ["JAVIER ESTEBAN", "ANTONIO DEL BARRIO"], "strict": True,
+     "max_block": {4: 3}, "days_wanted": 1},
 ]
 LESSON_TYPE = "class_45"          # clase individual de 45 min
 POLL_SECONDS = 1.0
@@ -140,6 +140,17 @@ def cancel(slot):
 
 # ---------------- lógica de selección ----------------
 
+def prefs_of(goal):
+    p = goal.get("prefer")
+    if not p:
+        return set()
+    return {p.upper()} if isinstance(p, str) else {x.upper() for x in p}
+
+
+def is_pref(goal, s):
+    return teacher(s).upper() in prefs_of(goal)
+
+
 def min_start(goal, date_str):
     wd = dt.date.fromisoformat(date_str).weekday()
     return next((m for d, m in goal["days"] if d == wd), None)
@@ -183,8 +194,7 @@ def best_block(goal, day_slots):
             blocks.append(chain)
     if not blocks:
         return []
-    pref = goal.get("prefer")
-    blocks.sort(key=lambda c: (0 if pref and teacher(c[0]).upper() == pref else 1, -len(c), c[0]["startTime"]))
+    blocks.sort(key=lambda c: (0 if is_pref(goal, c[0]) else 1, -len(c), c[0]["startTime"]))
     return blocks[0]
 
 
@@ -209,21 +219,22 @@ def plan_goal(goal, all_slots, skip, elapsed=1e9):
         d = m["date"]
         if need <= 0 or d in done or d in used:
             continue
-        mate = next((f for f in free if is_pair(m, f) or is_pair(f, m)), None)
+        mate = next((f for f in free if (is_pair(m, f) or is_pair(f, m))
+                     and (not goal.get("strict") or is_pref(goal, f))), None)
         if mate:
             to_book.append(mate); used.add(d); need -= 1
     # 2) Días nuevos. Mejor bloque de cada día candidato, con y sin el profe preferido.
-    pref = goal.get("prefer")
+    pref = bool(prefs_of(goal))
     cands = []   # (prioridad_del_día, bloque)
     for prio, (wd, _) in enumerate(goal["days"]):
         d = date_for(wd)
         if d in done or d in used or any(m["date"] == d for m in mine):
             continue
         block = best_block(goal, [f for f in free if f["date"] == d])
-        if block:
+        if block and (not goal.get("strict") or is_pref(goal, block[0])):
             cands.append((prio, block))
     while need > 0 and cands:
-        pref_cands = [c for c in cands if pref and teacher(c[1][0]).upper() == pref]
+        pref_cands = [c for c in cands if is_pref(goal, c[1][0])]
         if pref_cands:                                   # hay con el profe preferido: ese primero
             prio, block = min(pref_cands, key=lambda c: (c[0], -len(c[1]), c[1][0]["startTime"]))
         elif pref and elapsed < GRACE_SECONDS:           # aún puede salir el preferido: esperar
