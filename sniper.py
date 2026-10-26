@@ -41,7 +41,7 @@ GOALS = [
      "max_block": {}, "days_wanted": 2},
 ]
 LESSON_TYPE = "class_45"          # clase individual de 45 min
-POLL_SECONDS = 1.0
+POLL_SECONDS = 0.4
 GRACE_SECONDS = 0                 # 0 = no esperar: coge ya lo que haya (Javier preferido en la misma consulta)
 RUN_MINUTES = float(__import__("os").environ.get("RUN_MINUTES") or 90)   # cuánto rato vigila desde que lo lanzas
 # ------------------------------------------------
