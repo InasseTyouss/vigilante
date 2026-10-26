@@ -1,11 +1,10 @@
 """
 SNIPER Autius: consulta el calendario cada segundo y, en cuanto salen huecos, reserva.
 
-Objetivos (semana 2-6 nov 2026), se persiguen EN PARALELO:
-  DOBLE : 1 doble (2 seguidas mismo profe) martes 3 o miércoles 4 (prefiere martes), desde 18:45,
-          con ANTONIO DEL BARRIO (si no hay con él, otro profe).
-  TRIPLE: viernes 6 desde 15:15. Triple (3 seguidas mismo profe) si se puede, si no doble.
-          Preferente JAVIER ESTEBAN o ANTONIO DEL BARRIO; si no hay, otro profe.
+Objetivo (semana 9-13 nov 2026):
+  2 DOBLES en la semana, en 2 días distintos, con ANTONIO DEL BARRIO o DAVID PIZARRO (estricto).
+  L-J: mañana (las 2 clases terminan como muy tarde a las 09:00, p.ej. 07:30-08:15 + 08:15-09:00)
+       o noche (desde las 19:00). Viernes: desde las 16:00.
 Se reserva al instante lo que vaya saliendo (los días se abren a mano, poco a poco).
 
 Modos (variable MODE):
@@ -22,21 +21,24 @@ import requests
 
 # ---------------- CONFIGURACIÓN ----------------
 TZ = ZoneInfo("Europe/Madrid")
-WEEK_FROM, WEEK_TO = "2026-11-02", "2026-11-06"
+WEEK_FROM, WEEK_TO = "2026-11-09", "2026-11-13"
 # Cada objetivo: días (0=lunes) en orden de prioridad con su hora mínima de inicio,
 # horas de inicio exactas permitidas (None = cualquiera), profesor (None = cualquiera) y nº de días.
 # "prefer": profesor preferido (si no hay, vale otro). "max_block": días (0=lunes) en los que
 # se aceptan más de 2 clases seguidas (ej. viernes: hasta 3 -> triple).
+# Semana 9-13 nov. 2 DOBLES en la semana (2 días distintos), con ANTONIO DEL BARRIO o DAVID PIZARRO.
+# Franja por día ("day_windows"): cada ventana puede exigir hora mínima de inicio (smin), hora máxima
+# de inicio (smax) y hora máxima de FIN del bloque (emax). Una clase vale si cae en alguna ventana.
+#   L-J: mañana (las 2 clases acaban como muy tarde a las 09:00) o noche (desde las 19:00).
+#   Viernes: desde las 16:00.
+_LJ = [{"smin": "07:00", "emax": "09:00"}, {"smin": "19:00"}]
 GOALS = [
-    # Semana 2-6 nov. DOBLE: martes 3 o miércoles 4 (prefiere martes), desde 18:45, con ANTONIO DEL BARRIO.
-    # "strict": True -> solo reserva con los profes de "prefer"; si no hay, no reserva ese día.
-    {"name": "DOBLE", "days": [(1, "18:45"), (2, "18:45")],
-     "starts": None, "teacher": None, "prefer": ["ANTONIO DEL BARRIO"], "strict": True,
-     "max_block": {}, "days_wanted": 1},
-    # TRIPLE: viernes 6, desde 15:15. Triple si se puede (si no, doble). JAVIER ESTEBAN o ANTONIO DEL BARRIO.
-    {"name": "TRIPLE", "days": [(4, "15:15")],
-     "starts": None, "teacher": None, "prefer": ["JAVIER ESTEBAN", "ANTONIO DEL BARRIO"], "strict": True,
-     "max_block": {4: 3}, "days_wanted": 1},
+    # Lunes 9 es festivo -> fuera. Prioridad: martes, miércoles, viernes y, si no, jueves.
+    {"name": "DOBLES", "days": [(1, ""), (2, ""), (4, ""), (3, "")],
+     "day_windows": {1: _LJ, 2: _LJ, 3: _LJ, 4: [{"smin": "16:00"}]},
+     "starts": None, "teacher": None,
+     "prefer": ["ANTONIO DEL BARRIO", "DAVID PIZARRO"], "strict": True,
+     "max_block": {}, "days_wanted": 2},
 ]
 LESSON_TYPE = "class_45"          # clase individual de 45 min
 POLL_SECONDS = 1.0
@@ -151,15 +153,25 @@ def is_pref(goal, s):
     return teacher(s).upper() in prefs_of(goal)
 
 
-def min_start(goal, date_str):
+def windows_for(goal, date_str):
+    """Ventanas horarias permitidas ese día. None = ese día no vale."""
     wd = dt.date.fromisoformat(date_str).weekday()
-    return next((m for d, m in goal["days"] if d == wd), None)
+    dw = goal.get("day_windows")
+    if dw is not None:
+        return dw.get(wd)
+    m = next((mm for d, mm in goal["days"] if d == wd), None)   # compatibilidad: hora mínima simple
+    return [{"smin": m}] if m else None
 
 
 def valid(goal, s):
-    m = min_start(goal, s["date"])
-    st = hhmm(s["startTime"])
-    return (m is not None and st >= m
+    wins = windows_for(goal, s["date"])
+    if not wins:
+        return False
+    st, en = hhmm(s["startTime"]), hhmm(s["endTime"])
+    in_win = any(st >= w["smin"]
+                 and ("smax" not in w or st <= w["smax"])
+                 and ("emax" not in w or en <= w["emax"]) for w in wins)
+    return (in_win
             and (goal["starts"] is None or st in goal["starts"])
             and (goal["teacher"] is None or teacher(s).upper() == goal["teacher"])
             and s.get("lessonTypeKey", LESSON_TYPE) == LESSON_TYPE)
