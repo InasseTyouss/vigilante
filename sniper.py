@@ -34,10 +34,13 @@ WEEK_FROM, WEEK_TO = "2026-11-09", "2026-11-13"
 _LJ = [{"smin": "07:00", "emax": "09:00"}, {"smin": "19:00"}]
 GOALS = [
     # Lunes 9 es festivo -> fuera. Prioridad: martes, miércoles, viernes y, si no, jueves.
+    # "day_upgrades": [(a_día, desde_día)] -> si sale una doble válida en 'a_día' y tengo una en
+    # 'desde_día', cancela la de 'desde_día' y coge la de 'a_día'. Aquí: pasar del JUEVES al MIÉRCOLES.
     {"name": "DOBLES", "days": [(1, ""), (2, ""), (4, ""), (3, "")],
      "day_windows": {1: _LJ, 2: _LJ, 3: _LJ, 4: [{"smin": "16:00"}]},
      "starts": None, "teacher": None,
      "prefer": ["ANTONIO DEL BARRIO", "DAVID PIZARRO"], "strict": True,
+     "day_upgrades": [(2, 3)],
      "max_block": {}, "days_wanted": 2},
 ]
 LESSON_TYPE = "class_45"          # clase individual de 45 min
@@ -292,6 +295,29 @@ def plan_upgrades(all_slots, skip=frozenset()):
     return ups
 
 
+def plan_day_upgrades(all_slots, skip=frozenset()):
+    """Para objetivos con 'day_upgrades': si tengo una doble válida en 'desde_día' y sale una doble
+    válida (con profe permitido) en 'a_día', devuelve [{book:[a_día], cancel:[desde_día]}]."""
+    ups = []
+    for g in GOALS:
+        for to_wd, from_wd in g.get("day_upgrades", []):
+            d_to, d_from = date_for(to_wd), date_for(from_wd)
+            mine_from = best_block(g, [s for s in all_slots
+                                       if s.get("isReservedByMe") and s["date"] == d_from and valid(g, s)])
+            if len(mine_from) < 2:
+                continue
+            mine_to = best_block(g, [s for s in all_slots
+                                     if s.get("isReservedByMe") and s["date"] == d_to and valid(g, s)])
+            if len(mine_to) >= 2:                       # ya tengo doble ese día: nada que hacer
+                continue
+            free_to = [s for s in all_slots if not s.get("isReservedByMe") and s["date"] == d_to
+                       and valid(g, s) and is_pref(g, s) and s["id"] not in skip]
+            block = best_block(g, free_to)
+            if len(block) >= 2:
+                ups.append({"book": block, "cancel": mine_from})
+    return ups
+
+
 # ---------------- modos ----------------
 
 def probe():
@@ -342,7 +368,7 @@ def live():
     load_exit_points()
     booked_log, last_beat, fails = [], 0, {}
     up_next = {}                                   # día -> cuándo reintentar un upgrade
-    has_upgrade = any(g.get("upgrade_to") for g in GOALS)
+    has_upgrade = any(g.get("upgrade_to") or g.get("day_upgrades") for g in GOALS)
     done_emailed = False
     while True:
         if time.time() - t0 > RUN_MINUTES * 60:
@@ -354,11 +380,11 @@ def live():
             skip = {k for k, n in fails.items() if n >= 3}
 
             # --- UPGRADES: con saldo 0 hay que CANCELAR primero y reservar justo después ---
-            for up in plan_upgrades(slots, skip):
+            for up in plan_upgrades(slots, skip) + plan_day_upgrades(slots, skip):
                 d = up["book"][0]["date"]
                 if time.time() < up_next.get(d, 0):
                     continue
-                log("UPGRADE", d, "cancelo Luis y cojo:", [label(s) for s in up["book"]])
+                log("UPGRADE", d, "cancelo lo anterior y cojo:", [label(s) for s in up["book"]])
                 # 1) cancelar las que tengo para liberar saldo
                 cres = [cancel(s) for s in up["cancel"]]
                 for s, (ok, st, tx) in zip(up["cancel"], cres):
